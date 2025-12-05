@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+httpx
+pydantic
+pillow
+cssutils
+jsbeautifier
+beautifulsoup4
+python-multipart
