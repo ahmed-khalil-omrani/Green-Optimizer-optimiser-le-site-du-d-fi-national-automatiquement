@@ -95,27 +95,6 @@ const MainPage = () => {
                         />
                     </div>
 
-                    <div className="input-group" style={{ marginTop: '15px' }}>
-                        <label htmlFor="token-input" className="label">
-                            GitHub Token (optionnel, recommandé) :
-                        </label>
-                        <input
-                            id="token-input"
-                            type="password"
-                            placeholder="ghp_xxxxxxxxxxxx"
-                            className="url-input"
-                            value={githubToken}
-                            onChange={(e) => setGithubToken(e.target.value)}
-                            disabled={loading}
-                        />
-                        <small className="help-text">
-                            Un token GitHub permet d'éviter les limites de taux de l'API.
-                            <a href="https://github.com/settings/tokens" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--color-link)', marginLeft: '5px' }}>
-                                Créer un token →
-                            </a>
-                        </small>
-                    </div>
-
                     {error && (
                         <div style={{
                             marginTop: '15px',
@@ -125,7 +104,15 @@ const MainPage = () => {
                             borderRadius: '6px',
                             fontSize: '0.9em'
                         }}>
-                            ⚠️ {error}
+                            {error.includes('403') || error.includes('rate limit') ? (
+                                <span>
+                                    ⚠️ <strong>Limite GitHub atteinte.</strong><br/>
+                                    Vous avez dépassé le quota de requêtes anonymes (60/heure).<br/>
+                                    Veuillez réessayer dans une heure.
+                                </span>
+                            ) : (
+                                <span>⚠️ {error}</span>
+                            )}
                         </div>
                     )}
 

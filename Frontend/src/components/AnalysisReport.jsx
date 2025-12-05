@@ -9,11 +9,21 @@ const AnalysisReport = () => {
     const [analysisData, setAnalysisData] = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
+    
+    // Optimization State
+    const [optimizing, setOptimizing] = useState(false);
+    const [optimizationJob, setOptimizationJob] = useState(null);
+    const [optimizationOptions, setOptimizationOptions] = useState({
+        remove_comments: true,
+        remove_whitespace: true,
+        remove_unused_files: true,
+        optimize_images: true,
+        minify_code: true
+    });
 
     useEffect(() => {
         const fetchAnalysisData = async () => {
             try {
-                // Get data from navigation state or fetch from API
                 if (location.state?.analysisData) {
                     setAnalysisData(location.state.analysisData);
                     setLoading(false);
@@ -35,197 +45,217 @@ const AnalysisReport = () => {
         fetchAnalysisData();
     }, [location]);
 
-    if (loading) {
-        return (
-            <div className="analysis-report-container" style={{ textAlign: 'center', padding: '100px 20px' }}>
-                <h2>Chargement de l'analyse... ⏳</h2>
-                <p style={{ color: 'var(--color-text-secondary)' }}>Veuillez patienter</p>
-            </div>
-        );
-    }
+    // Polling function for optimization status
+    useEffect(() => {
+        let interval;
+        if (optimizing && optimizationJob?.job_id) {
+            interval = setInterval(async () => {
+                try {
+                    const status = await api.getOptimizationStatus(optimizationJob.job_id);
+                    setOptimizationJob(status);
+                    
+                    if (status.status === 'completed' || status.status === 'failed') {
+                        setOptimizing(false);
+                        clearInterval(interval);
+                    }
+                } catch (err) {
+                    console.error('Polling error:', err);
+                }
+            }, 1000);
+        }
+        return () => clearInterval(interval);
+    }, [optimizing, optimizationJob?.job_id]);
 
-    if (error || !analysisData) {
-        return (
-            <div className="analysis-report-container" style={{ textAlign: 'center', padding: '100px 20px' }}>
-                <h2 style={{ color: '#e74c3c' }}>⚠️ Erreur</h2>
-                <p>{error || 'Données non disponibles'}</p>
-                <button className="back-button" onClick={() => navigate('/')} style={{ position: 'static', marginTop: '20px' }}>
-                    Retour à l'accueil
-                </button>
-            </div>
-        );
-    }
+    const handleOptimize = async () => {
+        if (!analysisData?.analysis_id) return;
+        
+        try {
+            setOptimizing(true);
+            const response = await api.optimizeRepository(
+                analysisData.analysis_id, 
+                optimizationOptions
+            );
+            setOptimizationJob({ job_id: response.job_id, progress: 0, status: 'processing' });
+        } catch (err) {
+            setError('Erreur lors du lancement de l\'optimisation');
+            setOptimizing(false);
+        }
+    };
 
-    const { metrics, repo_name, timestamp } = analysisData;
-    const ecoindex = metrics?.ecoindex || {};
-    const images = metrics?.images || {};
-    const requests = metrics?.requests || {};
-    const deadCode = metrics?.dead_code || {};
+    const handleDownload = () => {
+        if (optimizationJob?.job_id) {
+            window.location.href = api.getDownloadUrl(optimizationJob.job_id);
+        }
+    };
 
-    // Format date
-    const formattedDate = new Date(timestamp).toLocaleDateString('fr-FR', {
-        year: 'numeric',
-        month: 'long',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit'
-    });
+    if (loading) return <div className="loading">Chargement...</div>;
+    if (error) return <div className="error">{error}</div>;
+    if (!analysisData) return null;
 
-    // Calculate savings percentage for images
-    const imageSavingsPercent = images.savings_percent || 0;
+    const { metrics, repo_url, branch, timestamp } = analysisData;
+    const unusedFiles = metrics.unused_files_advanced || {};
+    const comments = metrics.comments_analysis || {};
+    const whitespace = metrics.whitespace_analysis || {};
+
+    // Calculs pour l'affichage
+    const totalPotentialSavings = (
+        (unusedFiles.total_unused_size_mb || 0) + 
+        (whitespace.total_savings_kb || 0) / 1024
+    ).toFixed(2);
 
     return (
         <div className="analysis-report-container">
-            {/* HEADER ET SCORE GLOBAL */}
             <header className="report-header">
-                <button className="back-button" onClick={() => navigate(-1)}>
+                <button className="back-button" onClick={() => navigate('/')}>
                     <i className="fas fa-arrow-left"></i> Retour
                 </button>
                 <h1 className="report-title">
-                    <span className="green-text">Rapport d'Analyse</span>
+                    <span className="green-text">Rapport d'Analyse</span> V3.0
                 </h1>
-                <p className="url-text">pour {repo_name}</p>
-                <p className="date-text">Généré le: {formattedDate}</p>
+                <p className="url-text">{repo_url} ({branch})</p>
             </header>
 
-            {/* SECTION SCORE */}
+            {/* SCORE RESUME */}
             <div className="score-container">
                 <div className="score-item">
-                    <p className="score-label">EcoIndex</p>
-                    <span className="score-value eco-index">{ecoindex.grade || 'N/A'}</span>
+                    <p className="score-label">Fichiers Analysés</p>
+                    <span className="score-value">{metrics.total_files}</span>
                 </div>
                 <div className="score-item">
-                    <p className="score-label">Score ({ecoindex.rating || 'N/A'})</p>
-                    <span className="score-value performance">{ecoindex.score || 0}/100</span>
+                    <p className="score-label">Potentiel d'économie</p>
+                    <span className="score-value status">~{totalPotentialSavings} Mo</span>
                 </div>
                 <div className="score-item">
-                    <p className="score-label">Potentiel de Réduction</p>
-                    <span className="score-value status">{images.potential_savings_mb || 0} Mo</span>
-                </div>
-            </div>
-
-            {/* SECTION DÉTAILS */}
-            <h2 className="section-title">Détails et Potentiel d'Optimisation</h2>
-
-            {/* BLOC 1: IMAGES */}
-            {images.total_images > 0 && (
-                <div className="area-container">
-                    <div className="area-header">
-                        <h3 className="area-title"><i className="fas fa-image"></i> Images (Assets)</h3>
-                        <span className={`improvement-pill ${imageSavingsPercent > 50 ? '' : 'pill-warning'}`}>
-                            Amélioration: {Math.round(imageSavingsPercent)}%
-                        </span>
-                    </div>
-                    <p className="summary-text">
-                        Taille Actuelle Totale: {images.total_size_mb} Mo → Taille Optimale: {(images.total_size_mb - images.potential_savings_mb).toFixed(2)} Mo
-                    </p>
-
-                    <table className="details-table">
-                        <thead>
-                            <tr>
-                                <th>Fichier</th>
-                                <th>Taille Actuelle</th>
-                                <th>Taille Optimale</th>
-                                <th>Suggestion d'Optimisation</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {images.optimizable_list?.slice(0, 10).map((img, idx) => (
-                                <tr key={idx}>
-                                    <td data-label="Fichier" className="td-filename">{img.path.split('/').pop()}</td>
-                                    <td data-label="Taille Actuelle">{img.current_size_kb} Ko</td>
-                                    <td data-label="Taille Optimale" className="td-optimal-size">
-                                        {(img.current_size_kb - img.estimated_savings_kb).toFixed(2)} Ko
-                                    </td>
-                                    <td data-label="Suggestion" className="td-suggestion">
-                                        Convertir en {img.suggested_format.toUpperCase()} (économie: {img.estimated_savings_kb.toFixed(2)} Ko)
-                                    </td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
-                </div>
-            )}
-
-            {/* BLOC 2: REQUÊTES */}
-            <div className="area-container">
-                <div className="area-header">
-                    <h3 className="area-title"><i className="fas fa-network-wired"></i> Requêtes HTTP</h3>
-                    <span className="improvement-pill pill-warning">
-                        {requests.total_requests} requêtes
+                    <p className="score-label">Fichiers Inutiles</p>
+                    <span className="score-value error">
+                        {unusedFiles.unused_css?.count + unusedFiles.unused_js?.count + unusedFiles.unused_images?.count || 0}
                     </span>
                 </div>
-                <p className="summary-text">
-                    Poids total: {requests.total_size_mb} Mo | Moyenne: {requests.avg_file_size_kb} Ko/fichier
-                </p>
-
-                <table className="details-table">
-                    <thead>
-                        <tr>
-                            <th>Type</th>
-                            <th>Nombre</th>
-                            <th>Taille Totale</th>
-                            <th>Recommandation</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {Object.entries(requests.by_category || {}).map(([type, data]) => (
-                            data.count > 0 && (
-                                <tr key={type}>
-                                    <td data-label="Type" className="td-filename">{type.toUpperCase()}</td>
-                                    <td data-label="Nombre">{data.count}</td>
-                                    <td data-label="Taille" className="td-optimal-size">{data.size_mb} Mo</td>
-                                    <td data-label="Recommandation" className="td-suggestion">
-                                        {data.count > 10 ? 'Envisager le bundling' : 'OK'}
-                                    </td>
-                                </tr>
-                            )
-                        ))}
-                    </tbody>
-                </table>
             </div>
 
-            {/* BLOC 3: CODE MORT */}
-            {(deadCode.potentially_unused_css > 0 || deadCode.potentially_unused_js > 0) && (
-                <div className="area-container">
-                    <div className="area-header">
-                        <h3 className="area-title"><i className="fas fa-trash"></i> Code Non Utilisé</h3>
-                        <span className="improvement-pill pill-danger">
-                            {deadCode.total_unused_size_mb} Mo à supprimer
-                        </span>
-                    </div>
-                    <p className="summary-text">
-                        {deadCode.potentially_unused_css} fichiers CSS et {deadCode.potentially_unused_js} fichiers JS potentiellement inutilisés
-                    </p>
+            <h2 className="section-title">Détails de l'Optimisation</h2>
 
-                    <table className="details-table">
-                        <thead>
-                            <tr>
-                                <th>Fichier</th>
-                                <th>Type</th>
-                                <th>Taille</th>
-                                <th>Action</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {[...(deadCode.unused_css_files || []), ...(deadCode.unused_js_files || [])].slice(0, 10).map((file, idx) => (
-                                <tr key={idx}>
-                                    <td data-label="Fichier" className="td-filename">{file.path.split('/').pop()}</td>
-                                    <td data-label="Type">{file.path.endsWith('.css') ? 'CSS' : 'JS'}</td>
-                                    <td data-label="Taille" className="td-optimal-size">{file.size_kb} Ko</td>
-                                    <td data-label="Action" className="td-suggestion">Vérifier et supprimer si inutilisé</td>
-                                </tr>
+            {/* UNUSED FILES */}
+            <div className="area-container">
+                <h3 className="area-title"><i className="fas fa-trash"></i> Ressources Non Utilisées</h3>
+                <p>Ces fichiers sont présents dans le projet mais jamais importés ou référencés.</p>
+                
+                <div className="details-grid">
+                    {/* CSS */}
+                    <div className="detail-card">
+                        <h4>CSS Inutilisés ({unusedFiles.unused_css?.count || 0})</h4>
+                        <ul>
+                            {unusedFiles.unused_css?.files?.slice(0, 5).map((f, i) => (
+                                <li key={i}>{f.path.split('/').pop()} <span className="size-tag">{f.size_kb} Ko</span></li>
                             ))}
-                        </tbody>
-                    </table>
+                        </ul>
+                    </div>
+                    {/* JS */}
+                    <div className="detail-card">
+                        <h4>JS Inutilisés ({unusedFiles.unused_js?.count || 0})</h4>
+                        <ul>
+                            {unusedFiles.unused_js?.files?.slice(0, 5).map((f, i) => (
+                                <li key={i}>{f.path.split('/').pop()} <span className="size-tag">{f.size_kb} Ko</span></li>
+                            ))}
+                        </ul>
+                    </div>
+                    {/* IMAGES */}
+                    <div className="detail-card">
+                        <h4>Images Inutilisées ({unusedFiles.unused_images?.count || 0})</h4>
+                        <ul>
+                            {unusedFiles.unused_images?.files?.slice(0, 5).map((f, i) => (
+                                <li key={i}>{f.path.split('/').pop()} <span className="size-tag">{f.size_kb} Ko</span></li>
+                            ))}
+                        </ul>
+                    </div>
                 </div>
-            )}
+            </div>
 
-            {/* FOOTER */}
-            <div className="footer">
-                <button className="optimize-button" onClick={() => alert('Fonctionnalité d\'optimisation à venir!')}>
-                    Lancer l'Optimisation Automatique 🚀
-                </button>
+            {/* CODE QUALITY */}
+            <div className="area-container">
+                <h3 className="area-title"><i className="fas fa-code"></i> Qualité du Code</h3>
+                <div className="stats-row">
+                    <div className="stat-box">
+                        <strong>Espaces Inutiles</strong>
+                        <p>{whitespace.total_savings_kb || 0} Ko économisables</p>
+                        <small>Sur {whitespace.files_with_issues || 0} fichiers</small>
+                    </div>
+                    <div className="stat-box">
+                        <strong>Commentaires</strong>
+                        <p>{comments.total_comment_lines || 0} lignes</p>
+                        <small>{comments.avg_comment_percent}% du code</small>
+                    </div>
+                </div>
+            </div>
+
+            {/* OPTIMIZATION ACTIONS */}
+            <div className="optimization-zone">
+                <h2 className="section-title">🚀 Lancer l'Optimisation Automatique</h2>
+                
+                <div className="options-grid">
+                    <label>
+                        <input type="checkbox" checked={optimizationOptions.remove_unused_files}
+                            onChange={e => setOptimizationOptions({...optimizationOptions, remove_unused_files: e.target.checked})} />
+                        Supprimer les fichiers inutiles
+                    </label>
+                    <label>
+                        <input type="checkbox" checked={optimizationOptions.remove_comments}
+                            onChange={e => setOptimizationOptions({...optimizationOptions, remove_comments: e.target.checked})} />
+                        Supprimer les commentaires
+                    </label>
+                    <label>
+                        <input type="checkbox" checked={optimizationOptions.remove_whitespace}
+                            onChange={e => setOptimizationOptions({...optimizationOptions, remove_whitespace: e.target.checked})} />
+                        Nettoyer les espaces
+                    </label>
+                    <label>
+                        <input type="checkbox" checked={optimizationOptions.optimize_images}
+                            onChange={e => setOptimizationOptions({...optimizationOptions, optimize_images: e.target.checked})} />
+                        Compresser les images (WebP)
+                    </label>
+                    <label>
+                        <input type="checkbox" checked={optimizationOptions.minify_code}
+                            onChange={e => setOptimizationOptions({...optimizationOptions, minify_code: e.target.checked})} />
+                        Minifier le code (CSS/JS)
+                    </label>
+                </div>
+
+                {!optimizationJob && (
+                    <button className="optimize-button-large" onClick={handleOptimize} disabled={optimizing}>
+                        {optimizing ? 'Démarrage...' : 'Optimiser le Projet Maintenant'}
+                    </button>
+                )}
+
+                {/* PROGRESS & RESULT */}
+                {optimizationJob && (
+                    <div className="optimization-status">
+                        <div className="progress-bar">
+                            <div className="progress-fill" style={{width: `${optimizationJob.progress}%`}}></div>
+                        </div>
+                        <p className="status-text">
+                            Statut: {optimizationJob.status === 'processing' ? 'En cours...' : 
+                                     optimizationJob.status === 'completed' ? 'Terminé !' : 'Erreur'}
+                        </p>
+                        
+                        {optimizationJob.status === 'completed' && (
+                            <div className="success-box">
+                                <h3>✅ Optimisation Réussie !</h3>
+                                <p>Taille économisée : {(optimizationJob.stats?.bytes_saved / 1024 / 1024).toFixed(2)} Mo</p>
+                                <p>Fichiers supprimés : {optimizationJob.stats?.files_deleted}</p>
+                                <button className="download-button" onClick={handleDownload}>
+                                    <i className="fas fa-download"></i> Télécharger le projet optimisé (.zip)
+                                </button>
+                            </div>
+                        )}
+                        
+                        {optimizationJob.status === 'failed' && (
+                            <div className="error-box">
+                                <p>Erreur: {optimizationJob.error}</p>
+                                <button onClick={() => setOptimizationJob(null)}>Réessayer</button>
+                            </div>
+                        )}
+                    </div>
+                )}
             </div>
         </div>
     );

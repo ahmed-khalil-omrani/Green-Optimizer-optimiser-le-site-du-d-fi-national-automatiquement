@@ -11,7 +11,7 @@ class ApiService {
      * @param {string|null} githubToken - Optional GitHub token
      * @returns {Promise<Object>} Analysis result
      */
-    async analyzeRepository(repoUrl, branch = 'main', githubToken = null) {
+    async analyzeRepository(repoUrl, branch = 'main') {
         const response = await fetch(`${API_BASE_URL}/api/analyze`, {
             method: 'POST',
             headers: {
@@ -20,7 +20,7 @@ class ApiService {
             body: JSON.stringify({
                 repo_url: repoUrl,
                 branch: branch,
-                github_token: githubToken
+                github_token: null
             })
         });
 
@@ -49,12 +49,18 @@ class ApiService {
     }
 
     /**
-     * Optimize repository files
+     * Optimize repository files (V3)
      * @param {string} analysisId - Analysis ID
-     * @param {Array<string>} optimizations - Types of optimizations to apply
-     * @returns {Promise<Object>} Optimization result
+     * @param {Object} options - Cleanup options
+     * @returns {Promise<Object>} Job ID
      */
-    async optimizeRepository(analysisId, optimizations = ['images', 'css', 'js', 'html']) {
+    async optimizeRepository(analysisId, options = {
+        remove_comments: true,
+        remove_whitespace: true,
+        remove_unused_files: true,
+        optimize_images: true,
+        minify_code: true
+    }) {
         const response = await fetch(`${API_BASE_URL}/api/optimize`, {
             method: 'POST',
             headers: {
@@ -62,8 +68,8 @@ class ApiService {
             },
             body: JSON.stringify({
                 analysis_id: analysisId,
-                optimizations: optimizations,
-                create_pull_request: false
+                cleanup_options: options,
+                output_format: 'zip'
             })
         });
 
@@ -73,6 +79,26 @@ class ApiService {
         }
 
         return await response.json();
+    }
+
+    /**
+     * Get optimization status
+     * @param {string} jobId - Job ID
+     * @returns {Promise<Object>} Job status
+     */
+    async getOptimizationStatus(jobId) {
+        const response = await fetch(`${API_BASE_URL}/api/optimize/status/${jobId}`);
+        if (!response.ok) throw new Error('Failed to get status');
+        return await response.json();
+    }
+
+    /**
+     * Get download URL
+     * @param {string} jobId - Job ID
+     * @returns {string} Download URL
+     */
+    getDownloadUrl(jobId) {
+        return `${API_BASE_URL}/api/optimize/download/${jobId}`;
     }
 
     /**
