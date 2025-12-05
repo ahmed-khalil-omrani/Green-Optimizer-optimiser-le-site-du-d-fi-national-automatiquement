@@ -11,7 +11,7 @@ class ApiService {
      * @param {string|null} githubToken - Optional GitHub token
      * @returns {Promise<Object>} Analysis result
      */
-    async analyzeRepository(repoUrl, branch = 'main') {
+    async analyzeRepository(repoUrl, branch = 'main', githubToken = null) {
         const response = await fetch(`${API_BASE_URL}/api/analyze`, {
             method: 'POST',
             headers: {
@@ -20,7 +20,7 @@ class ApiService {
             body: JSON.stringify({
                 repo_url: repoUrl,
                 branch: branch,
-                github_token: null
+                github_token: githubToken
             })
         });
 
@@ -74,8 +74,14 @@ class ApiService {
         });
 
         if (!response.ok) {
-            const error = await response.json();
-            throw new Error(error.detail || 'Optimization failed');
+            let errorMessage = 'Optimization failed';
+            try {
+                const error = await response.json();
+                errorMessage = error.detail || error.message || JSON.stringify(error);
+            } catch (e) {
+                errorMessage = `HTTP ${response.status}: ${response.statusText}`;
+            }
+            throw new Error(errorMessage);
         }
 
         return await response.json();
@@ -87,7 +93,7 @@ class ApiService {
      * @returns {Promise<Object>} Job status
      */
     async getOptimizationStatus(jobId) {
-        const response = await fetch(`${API_BASE_URL}/api/optimize/status/${jobId}`);
+        const response = await fetch(`${API_BASE_URL}/api/status/${jobId}`);
         if (!response.ok) throw new Error('Failed to get status');
         return await response.json();
     }
@@ -98,7 +104,7 @@ class ApiService {
      * @returns {string} Download URL
      */
     getDownloadUrl(jobId) {
-        return `${API_BASE_URL}/api/optimize/download/${jobId}`;
+        return `${API_BASE_URL}/api/download/${jobId}`;
     }
 
     /**

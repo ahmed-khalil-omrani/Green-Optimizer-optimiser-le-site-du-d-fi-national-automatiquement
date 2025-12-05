@@ -511,91 +511,137 @@ class ProjectOptimizer:
             'images_optimized': 0
         }
     
-    async def clone_and_optimize(self) -> str:
+    async def clone_and_optimize(self, progress_callback=None) -> str:
         """Clone le projet et applique toutes les optimisations"""
         
         logger.info(f"Starting project optimization in {self.temp_dir}")
         
         try:
-            files = await self.analyzer.get_repo_tree()
+            # 1. Git Clone
+            repo_url = self.analyzer.repo_url
+            auth_url = repo_url
             
-            for file_info in files:
-                if file_info['type'] == 'tree':
-                    dir_path = Path(self.temp_dir) / file_info['path']
-                    dir_path.mkdir(parents=True, exist_ok=True)
+            if self.analyzer.token:
+                # Inject token into URL for authentication
+                if repo_url.startswith("https://"):
+                    auth_url = repo_url.replace("https://", f"https://oauth2:{self.analyzer.token}@")
             
+            logger.info(f"Cloning repository...")
+            
+            # Execute git clone with NO PROMPTS
+            env = os.environ.copy()
+            env["GIT_TERMINAL_PROMPT"] = "0"
+            
+            cmd = ["git", "clone", "--depth", "1", "--branch", self.analyzer.branch, str(auth_url), self.temp_dir]
+            process = await asyncio.to_thread(
+                subprocess.run, 
+                cmd, 
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.PIPE,
+                env=env
+            )
+            
+            if process.returncode != 0:
+                error_msg = process.stderr.decode() if process.stderr else "Unknown git error"
+                if self.analyzer.token:
+                    error_msg = error_msg.replace(self.analyzer.token, "***")
+                raise Exception(f"Git clone failed: {error_msg}")
+
+            if progress_callback:
+                progress_callback(30)
+
+            # 2. Identify Unused Files
             files_to_delete = set()
             if self.options.remove_unused_files:
                 unused_data = self.analysis['metrics'].get('unused_files_advanced', {})
-                for unused_css in unused_data.get('unused_css', {}).get('files', []):
-                    files_to_delete.add(unused_css['path'])
-                for unused_js in unused_data.get('unused_js', {}).get('files', []):
-                    files_to_delete.add(unused_js['path'])
-                for unused_img in unused_data.get('unused_images', {}).get('files', []):
-                    files_to_delete.add(unused_img['path'])
-            
-            for file_info in files:
-                if file_info['type'] != 'blob':
-                    continue
+                for category in ['unused_css', 'unused_js', 'unused_images']:
+                    for item in unused_data.get(category, {}).get('files', []):
+                        files_to_delete.add(item['path'].replace('/', os.sep))
+
+            # Count total files for progress
+            total_files = sum([len(files) for r, d, files in os.walk(self.temp_dir) if '.git' not in d])
+            files_processed_count = 0
+
+            # 3. Iterate and Optimize
+            for root, dirs, files in os.walk(self.temp_dir):
+                if '.git' in dirs:
+                    dirs.remove('.git')
                 
-                file_path = file_info['path']
-                
-                if file_path in files_to_delete:
-                    self.stats['files_deleted'] += 1
-                    logger.info(f"Skipping unused file: {file_path}")
-                    continue
-                
-                try:
-                    content = await self.analyzer.get_file_content(file_path)
-                    if not content:
+                for file_name in files:
+                    file_path = os.path.join(root, file_name)
+                    rel_path = os.path.relpath(file_path, self.temp_dir)
+                    
+                    files_processed_count += 1
+                    # Update progress every 10 files
+                    if progress_callback and files_processed_count % 10 == 0 and total_files > 0:
+                         # Scale progress from 30 to 90
+                         current_progress = 30 + int((files_processed_count / total_files) * 60)
+                         progress_callback(current_progress)
+
+                    # Check deletion
+                    if rel_path in files_to_delete or rel_path.replace(os.sep, '/') in files_to_delete:
+                        try:
+                            os.remove(file_path)
+                            self.stats['files_deleted'] += 1
+                        except OSError:
+                            pass
                         continue
                     
-                    original_size = len(content)
-                    file_ext = Path(file_path).suffix.lower().replace('.', '')
-                    
-                    if file_ext in ['jpg', 'jpeg', 'png', 'bmp'] and self.options.optimize_images:
-                        content = await self._optimize_image(content)
-                        self.stats['images_optimized'] += 1
-                    
-                    elif file_ext in ['css', 'js', 'html', 'htm', 'py', 'jsx', 'tsx', 'ts']:
-                        text_content = content.decode('utf-8', errors='ignore')
-                        
-                        if self.options.remove_comments:
-                            original_text = text_content
-                            text_content = CodeCleaner.remove_comments(text_content, file_ext)
-                            if len(text_content) < len(original_text):
-                                self.stats['comments_removed'] += 1
-                        
-                        if self.options.remove_whitespace:
-                            original_text = text_content
-                            text_content = CodeCleaner.clean_whitespace(text_content, aggressive=True)
-                            if len(text_content) < len(original_text):
-                                self.stats['whitespace_cleaned'] += 1
-                        
-                        if self.options.minify_code:
-                            if file_ext == 'css':
-                                text_content = CodeCleaner.minify_css(text_content)
-                            elif file_ext in ['js', 'jsx', 'ts', 'tsx']:
-                                text_content = CodeCleaner.minify_js(text_content)
-                            elif file_ext in ['html', 'htm']:
-                                text_content = CodeCleaner.minify_html(text_content)
-                        
-                        content = text_content.encode('utf-8')
-                    
-                    output_path = Path(self.temp_dir) / file_path
-                    output_path.parent.mkdir(parents=True, exist_ok=True)
-                    
-                    with open(output_path, 'wb') as f:
-                        f.write(content)
-                    
-                    new_size = len(content)
-                    self.stats['bytes_saved'] += (original_size - new_size)
                     self.stats['files_processed'] += 1
                     
-                except Exception as e:
-                    logger.error(f"Error processing {file_path}: {str(e)}")
-                    continue
+                    # Optimize Content
+                    try:
+                        file_ext = Path(file_path).suffix.lower().replace('.', '')
+                        
+                        # Images
+                        if file_ext in ['jpg', 'jpeg', 'png', 'bmp'] and self.options.optimize_images:
+                            with open(file_path, 'rb') as f:
+                                content = f.read()
+                            optimized_content = await self._optimize_image(content)
+                            if len(optimized_content) < len(content):
+                                with open(file_path, 'wb') as f:
+                                    f.write(optimized_content)
+                                self.stats['images_optimized'] += 1
+                                self.stats['bytes_saved'] += (len(content) - len(optimized_content))
+
+                        # Code
+                        elif file_ext in ['css', 'js', 'html', 'htm', 'py', 'jsx', 'tsx', 'ts']:
+                            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                                original_text = f.read()
+                            
+                            text_content = original_text
+                            
+                            if self.options.remove_comments:
+                                text_content = CodeCleaner.remove_comments(text_content, file_ext)
+                                if len(text_content) < len(original_text):
+                                    self.stats['comments_removed'] += 1
+                            
+                            if self.options.remove_whitespace:
+                                text_content = CodeCleaner.clean_whitespace(text_content, aggressive=True)
+                                if len(text_content) < len(original_text):
+                                    self.stats['whitespace_cleaned'] += 1
+                            
+                            if self.options.minify_code:
+                                if file_ext == 'css':
+                                    text_content = CodeCleaner.minify_css(text_content)
+                                elif file_ext in ['js', 'jsx', 'ts', 'tsx']:
+                                    text_content = CodeCleaner.minify_js(text_content)
+                                elif file_ext in ['html', 'htm']:
+                                    text_content = CodeCleaner.minify_html(text_content)
+                            
+                            if len(text_content) != len(original_text):
+                                with open(file_path, 'w', encoding='utf-8') as f:
+                                    f.write(text_content)
+                                self.stats['bytes_saved'] += (len(original_text) - len(text_content))
+                                
+                    except Exception as e:
+                        logger.error(f"Error optimizing {rel_path}: {e}")
             
+            # Clean .git
+            git_dir = os.path.join(self.temp_dir, '.git')
+            if os.path.exists(git_dir):
+                shutil.rmtree(git_dir, ignore_errors=True)
+
             logger.info(f"Optimization complete: {self.stats}")
             return self.temp_dir
             
@@ -646,6 +692,181 @@ class ProjectOptimizer:
                 tar.add(self.temp_dir, arcname=archive_name)
         
         return archive_path
+
+# ==================== HTML REPORT GENERATOR ====================
+
+def generate_optimization_report_html(stats: Dict, repo_name: str, timestamp: str) -> str:
+    """Génère un rapport HTML d'optimisation avec les données réelles"""
+    
+    total_optimizations = (
+        stats.get('comments_removed', 0) +
+        stats.get('whitespace_cleaned', 0) +
+        stats.get('files_deleted', 0) +
+        stats.get('images_optimized', 0)
+    )
+    
+    html = f"""<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rapport d'Optimisation - {repo_name}</title>
+    <style>
+        body {{
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }}
+        .header {{
+            background: linear-gradient(135deg, #2ecc71 0%, #27ae60 100%);
+            color: white;
+            padding: 30px;
+            border-radius: 8px;
+            margin-bottom: 30px;
+        }}
+        .header h1 {{
+            margin: 0 0 10px 0;
+        }}
+        .stats {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }}
+        .stat-card {{
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }}
+        .stat-card h3 {{
+            margin: 0 0 10px 0;
+            color: #666;
+            font-size: 14px;
+        }}
+        .stat-card .value {{
+            font-size: 32px;
+            font-weight: bold;
+            color: #2ecc71;
+        }}
+        .section {{
+            background: white;
+            padding: 20px;
+            margin-bottom: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }}
+        .section h2 {{
+            margin: 0 0 15px 0;
+            color: #333;
+            border-bottom: 2px solid #2ecc71;
+            padding-bottom: 10px;
+        }}
+        .detail-row {{
+            display: flex;
+            justify-content: space-between;
+            padding: 10px 0;
+            border-bottom: 1px solid #eee;
+        }}
+        .detail-row:last-child {{
+            border-bottom: none;
+        }}
+        .detail-label {{
+            font-weight: 600;
+            color: #555;
+        }}
+        .detail-value {{
+            color: #2ecc71;
+            font-weight: 700;
+        }}
+        footer {{
+            margin-top: 40px;
+            padding-top: 20px;
+            border-top: 1px solid #ddd;
+            color: #666;
+            font-size: 14px;
+            text-align: center;
+        }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🌱 Green Optimizer - Rapport d'Optimisation</h1>
+        <p><strong>Projet:</strong> {repo_name}</p>
+        <p><strong>Date:</strong> {timestamp}</p>
+    </div>
+
+    <div class="stats">
+        <div class="stat-card">
+            <h3>Total Optimisations</h3>
+            <div class="value">{total_optimizations}</div>
+        </div>
+        <div class="stat-card">
+            <h3>Fichiers Traités</h3>
+            <div class="value">{stats.get('files_processed', 0)}</div>
+        </div>
+        <div class="stat-card">
+            <h3>Fichiers Supprimés</h3>
+            <div class="value">{stats.get('files_deleted', 0)}</div>
+        </div>
+        <div class="stat-card">
+            <h3>Espace Économisé</h3>
+            <div class="value">{round(stats.get('bytes_saved', 0) / 1024, 2)} KB</div>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>📊 Détails de l'Optimisation</h2>
+        <div class="detail-row">
+            <span class="detail-label">Commentaires Supprimés</span>
+            <span class="detail-value">{stats.get('comments_removed', 0)} fichiers</span>
+        </div>
+        <div class="detail-row">
+            <span class="detail-label">Espaces Nettoyés</span>
+            <span class="detail-value">{stats.get('whitespace_cleaned', 0)} fichiers</span>
+        </div>
+        <div class="detail-row">
+            <span class="detail-label">Images Optimisées</span>
+            <span class="detail-value">{stats.get('images_optimized', 0)} images</span>
+        </div>
+        <div class="detail-row">
+            <span class="detail-label">Total Octets Économisés</span>
+            <span class="detail-value">{stats.get('bytes_saved', 0):,} octets</span>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>✅ Optimisations Appliquées</h2>
+        <ul style="line-height: 1.8; color: #555;">
+            <li>✂️ Suppression des commentaires de code</li>
+            <li>🧹 Nettoyage des espaces blancs inutiles</li>
+            <li>🗑️ Suppression des fichiers non utilisés</li>
+            <li>🖼️ Compression et optimisation des images</li>
+            <li>📦 Minification du code CSS/JS</li>
+        </ul>
+    </div>
+
+    <div class="section">
+        <h2>💡 Recommandations</h2>
+        <ul style="line-height: 1.8; color: #555;">
+            <li>Testez votre code optimisé avant de le déployer en production</li>
+            <li>Vérifiez que toutes les fonctionnalités sont préservées</li>
+            <li>Activez la compression gzip sur votre serveur web</li>
+            <li>Utilisez un CDN pour les ressources statiques</li>
+            <li>Exécutez Green Optimizer régulièrement pour maintenir les performances</li>
+        </ul>
+    </div>
+
+    <footer>
+        <p><strong>Green Optimizer v3.0</strong> - Outil d'Optimisation Automatique</p>
+        <p>Généré par Green Optimizer | Rendre le web plus vert, un dépôt à la fois 🌱</p>
+    </footer>
+</body>
+</html>"""
+    
+    return html
 
 # ==================== API ENDPOINTS ====================
 
@@ -758,10 +979,16 @@ async def optimize_project(request: FullOptimizationRequest, background_tasks: B
                 request.cleanup_options
             )
             
-            optimization_jobs[job_id]['progress'] = 30
-            temp_dir = await optimizer.clone_and_optimize()
+            # Callback to update progress
+            def update_progress(p):
+                optimization_jobs[job_id]['progress'] = p
+
+            optimization_jobs[job_id]['progress'] = 10
             
-            optimization_jobs[job_id]['progress'] = 70
+            # Pass callback to clone_and_optimize
+            temp_dir = await optimizer.clone_and_optimize(progress_callback=update_progress)
+            
+            optimization_jobs[job_id]['progress'] = 90
             archive_path = optimizer.create_archive(request.output_format)
             
             cleaned_projects[job_id] = archive_path
@@ -820,6 +1047,48 @@ async def download_optimized_project(job_id: str):
         archive_path,
         media_type='application/zip' if archive_path.endswith('.zip') else 'application/gzip',
         filename=os.path.basename(archive_path)
+    )
+
+@app.get("/api/optimize/report/{job_id}")
+async def download_optimization_report(job_id: str):
+    """Télécharge le rapport HTML d'optimisation"""
+    
+    if job_id not in optimization_jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    job = optimization_jobs[job_id]
+    
+    if job['status'] != 'completed':
+        raise HTTPException(status_code=400, detail="Optimization not completed")
+    
+    stats = job.get('stats', {})
+    
+    # Extract repo name from analysis if available
+    repo_name = "Project"
+    if 'analysis_id' in job:
+        analysis_id = job.get('analysis_id')
+        if analysis_id and analysis_id in analyses_storage:
+            analysis = analyses_storage[analysis_id]
+            repo_url = analysis.get('repo_url', '')
+            if repo_url:
+                repo_name = repo_url.split('/')[-1].replace('.git', '')
+    
+    timestamp = job.get('completed_at', datetime.now().isoformat())
+    
+    # Generate HTML report
+    report_html = generate_optimization_report_html(stats, repo_name, timestamp)
+    
+    # Save to temp file
+    temp_file = tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False, encoding='utf-8')
+    temp_file.write(report_html)
+    temp_file.close()
+    
+    filename = f"rapport_optimisation_{repo_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+    
+    return FileResponse(
+        temp_file.name,
+        media_type='text/html',
+        filename=filename
     )
 
 @app.get("/api/analysis/{analysis_id}")

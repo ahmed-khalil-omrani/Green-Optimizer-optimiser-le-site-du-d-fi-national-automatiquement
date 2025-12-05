@@ -7,3 +7,4 @@ cssutils
 jsbeautifier
 beautifulsoup4
 python-multipart
+    
